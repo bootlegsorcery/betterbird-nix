@@ -1,114 +1,85 @@
 {
   lib,
-  buildMozillaMach,
-  fetchFromGitHub,
+  stdenv,
   fetchurl,
-  git,
-  thunderbirdPackages,
+  wrapGAppsHook3,
+  autoPatchelfHook,
+  patchelfUnstable,
+  alsa-lib,
+  gtk3,
 }:
 
 let
-  thunderbird-unwrapped = thunderbirdPackages.thunderbird-153;
+  version = "153.6.0esr-bb12";
 
-  version = "153.6.0esr";
-  majVer = lib.versions.major version;
-
-  betterbird-patches = fetchFromGitHub {
-    owner = "Betterbird";
-    repo = "thunderbird-patches";
-    rev = "${version}-bb12";
-    hash = "sha256-cdo2DLyRdJmw1QZZ3R30h0BwoI6u6aWMABDc9SXObLw=";
+  sources = {
+    x86_64-linux = {
+      url = "https://www.betterbird.eu/downloads/LinuxArchive/betterbird-153.6.0esr-bb12.en-US.linux-x86_64.tar.xz";
+      hash = "sha256-nYC2s0Jcl9k87qutPy3gxyLg/QVTHY0to0SVhqhV9B8=";
+    };
+    aarch64-linux = {
+      url = "https://www.betterbird.eu/downloads/LinuxArchive/betterbird-153-linux-aarch64-built-with-glibc-2_36/betterbird-153.6.0esr-bb12.en-US.linux-aarch64.tar.xz";
+      hash = "sha256-t4rzmXuyjSkQQP+I1vRnVg2wylLIcZU6WvGap3+qTzg=";
+    };
   };
 
-  betterbird-mach = buildMozillaMach {
-    pname = "betterbird";
-    inherit version;
+  source = sources.${stdenv.hostPlatform.system} or (throw "Unsupported system: ${stdenv.hostPlatform.system}");
+in
+stdenv.mkDerivation {
+  pname = "betterbird-unwrapped";
+  inherit version;
 
+  src = fetchurl {
+    inherit (source) url hash;
+  };
+
+  nativeBuildInputs = [
+    wrapGAppsHook3
+    autoPatchelfHook
+    patchelfUnstable
+  ];
+
+  buildInputs = [ alsa-lib ];
+
+  # Betterbird uses Mozilla's relrhack to process relocations from a fixed offset.
+  patchelfFlags = [ "--no-clobber-old-sections" ];
+
+  postPatch = ''
+    # Updates are managed by Nix so the immutable installation is never modified.
+    echo 'pref("app.update.auto", "false");' >> defaults/pref/channel-prefs.js
+  '';
+
+  installPhase = ''
+    runHook preInstall
+
+    mkdir -p "$prefix/usr/lib/betterbird"
+    cp -r . "$prefix/usr/lib/betterbird"
+
+    mkdir -p "$out/bin"
+    ln -s "$prefix/usr/lib/betterbird/betterbird" "$out/bin/betterbird"
+
+    # wrapThunderbird expects the application under $out/lib.
+    ln -s "$out/usr/lib" "$out/lib"
+    gappsWrapperArgs+=(--argv0 "$out/bin/.betterbird-wrapped")
+
+    runHook postInstall
+  '';
+
+  passthru = {
     applicationName = "Betterbird";
     binaryName = "betterbird";
-    branding = "comm/mail/branding/betterbird";
-    inherit (thunderbird-unwrapped) application extraPatches;
-
-    src = fetchurl {
-      url = "https://archive.mozilla.org/pub/thunderbird/candidates/153.6.0esr-candidates/build1/source/thunderbird-153.6.0esr.source.tar.xz";
-      sha512 = "sha512-F9YcmBF8QZkufQUsEj8KxENBCYNmRSjLVg3IJCFnfx920LBHPvD6db5Hh3adIhgCXXsnq999tuJwAEI29l+ryA==";
-    };
-
-    extraPostPatch =
-      thunderbird-unwrapped.extraPostPatch or ""
-      + /* bash */ ''
-        PATH=$PATH:${lib.makeBinPath [ git ]}
-        patches=$(mktemp -d)
-        for dir in branding bugs cherrypicks external features misc; do
-          cp -r ${betterbird-patches}/${majVer}/$dir $patches/ 2>/dev/null || true
-        done
-        cp ${betterbird-patches}/${majVer}/series* $patches/
-        chmod -R +w $patches
-
-        chmod -R +w dom/base/test/gtest/
-
-        while read patch; do
-          patch="''${patch%%#*}"
-          patch=$(echo "$patch" | xargs)
-          if [[ $patch == "" ]]; then
-            continue
-          fi
-
-          # requires vendored icu, fails to link with our icu
-          # feature-506064 depends on those icu patches
-          if [[ $patch == *14-feature-regexp-searchterm.patch || $patch == *14-feature-regexp-searchterm-moz.patch || $patch == *feature-506064-match-diacritics.patch || $patch == *feature-506064-match-diacritics-moz.patch ]]; then
-            continue
-          fi
-
-          echo Applying patch $patch.
-          if [[ $patch == *-moz.patch ]]; then
-            git apply -p1 -v < $patches/$patch
-          else
-            cd comm
-            git apply -p1 -v < $patches/$patch
-            cd ..
-          fi
-        done < <(cat $patches/series $patches/series-moz)
-
-        # Fix MOZ_APP_NAME conflict: comm/mail/moz.configure implies "thunderbird"
-        # but buildMozillaMach passes --with-app-name=betterbird
-        substituteInPlace comm/mail/moz.configure \
-          --replace-fail 'imply_option("MOZ_APP_NAME", "thunderbird")' 'imply_option("MOZ_APP_NAME", "betterbird")'
-      '';
-
-    meta = {
-      description = "Betterbird is a fine-tuned version of Mozilla Thunderbird, Thunderbird on steroids, if you will";
-      homepage = "https://www.betterbird.eu/";
-      mainProgram = "betterbird";
-      maintainers = with lib.maintainers; [ ];
-      platforms = thunderbird-unwrapped.meta.platforms;
-      license = thunderbird-unwrapped.meta.license;
-      broken = thunderbird-unwrapped.meta.broken or false;
-    };
+    inherit gtk3;
+    withFFmpeg = true;
+    withGSSAPI = true;
   };
 
-  betterbird-with-flags = betterbird-mach.override {
-    enableCrashReporter = false; # not supported
-    enableLocation = false;
-    enableWebRTC = false;
-    enablePGO = false; # console.warn: feeds: "downloadFeed: network connection unavailable"
+  meta = {
+    description = "Betterbird, a fine-tuned version of Mozilla Thunderbird (official binary)";
+    homepage = "https://www.betterbird.eu/";
+    mainProgram = "betterbird";
+    sourceProvenance = with lib.sourceTypes; [ binaryNativeCode ];
+    license = lib.licenses.mpl20;
+    platforms = builtins.attrNames sources;
+    hydraPlatforms = [ ];
   };
-in
-betterbird-with-flags.overrideAttrs (oldAttrs: {
-  postInstall =
-    oldAttrs.postInstall or ""
-    + ''
-      if [ -d "$out/lib/thunderbird" ]; then
-        mv $out/lib/thunderbird/* $out/lib/betterbird/
-        rmdir $out/lib/thunderbird/
-        rm $out/bin/thunderbird
-        ln -srf $out/lib/betterbird/betterbird $out/bin/betterbird
-      fi
-    '';
-
-  doInstallCheck = false;
-
-  passthru = oldAttrs.passthru or { } // {
-    inherit betterbird-patches;
-  };
-})
+}
